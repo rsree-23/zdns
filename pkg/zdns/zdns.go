@@ -251,7 +251,7 @@ func Run(gc GlobalConf, flags *pflag.FlagSet,
 	}
 
 	// setup i/o
-	gc.InputHandler = iohandlers.NewFileInputHandler(gc.InputFilePath)
+	gc.InputHandler = iohandlers.NewStreamInputHandler(nil)
 	gc.OutputHandler = iohandlers.NewFileOutputHandler(gc.OutputFilePath)
 
 	// allow the factory to initialize itself

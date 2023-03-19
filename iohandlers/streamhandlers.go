@@ -15,34 +15,64 @@
 package iohandlers
 
 import (
-	"bufio"
 	"io"
 	"sync"
 
+	"github.com/CaliDog/certstream-go"
 	log "github.com/sirupsen/logrus"
 )
 
-type StreamInputHandler struct {
-	reader io.Reader
-}
+type StreamInputHandler struct{}
 
 func NewStreamInputHandler(r io.Reader) *StreamInputHandler {
-	return &StreamInputHandler{
-		reader: r,
-	}
+	return &StreamInputHandler{}
 }
 
 func (h *StreamInputHandler) FeedChannel(in chan<- interface{}, wg *sync.WaitGroup) error {
 	defer close(in)
 	defer (*wg).Done()
 
-	s := bufio.NewScanner(h.reader)
-	for s.Scan() {
-		in <- s.Text()
+	// false argument means we want heartbeat messages.
+	stream, errStream := certstream.CertStreamEventStream(false)
+
+	// as of now, loops until certstream encounters a "heartbeat" message
+	for {
+		select {
+		case jq := <-stream:
+			messageType, err := jq.String("message_type")
+			if err != nil {
+				log.Print("Error decoding JsonQuery object jq")
+				break
+			}
+			// stop when we encounter a "heartbeat" message
+			if messageType != "certificate_update" {
+				break
+			}
+			// access all_domains array in json object
+			all_domains_array, err := jq.Array("data", "leaf_cert", "all_domains")
+			if err != nil {
+				log.Print("Error decoding JsonQuery object jq")
+				break
+			}
+			// send domain into in chan
+			for _, element := range all_domains_array {
+				if element != nil {
+					domain := element.(string)
+					in <- domain
+				}
+			}
+		case err := <-errStream:
+			log.Printf("%v", err)
+		}
 	}
-	if err := s.Err(); err != nil {
-		log.Fatalf("unable to read input stream: %v", err)
-	}
+
+	// s := bufio.NewScanner(h.reader)
+	// for s.Scan() {
+	// 	in <- s.Text()
+	// }
+	// if err := s.Err(); err != nil {
+	// 	log.Fatalf("unable to read input stream: %v", err)
+	// }
 	return nil
 }
 
