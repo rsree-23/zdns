@@ -250,7 +250,7 @@ func Run(gc GlobalConf, flags *pflag.FlagSet,
 		log.Fatal("Specified module does not allow reading from stdin")
 	}
 
-	// setup i/o
+	// setup i/o,
 	gc.InputHandler = iohandlers.NewStreamInputHandler(nil)
 	gc.OutputHandler = iohandlers.NewFileOutputHandler(gc.OutputFilePath)
 
