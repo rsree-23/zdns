@@ -16,8 +16,10 @@ package miekg
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -979,6 +981,171 @@ func (s *Lookup) DoLookup(name, nameServer string) (interface{}, zdns.Trace, zdn
 		l := MiekgLookupClient{}
 		return s.DoLookupAllNameservers(l, name, nameServer)
 	} else {
+		s.BuildGraph(Question{Name: name, Type: s.DNSType, Class: s.DNSClass}, nameServer)
 		return s.DoMiekgLookup(Question{Name: name, Type: s.DNSType, Class: s.DNSClass}, nameServer)
 	}
+}
+
+func parseParent(name string) string {
+	name = removeTrailingDot(name)
+	start := strings.Index(name, ".")
+	if start == -1 {
+		return "."
+	}
+	return name[start+1:]
+}
+
+func removeTrailingDot(name string) string {
+	return strings.TrimSuffix(name, ".")
+}
+
+type GraphNode struct {
+	// NSRecord
+
+	IsNS          bool     `json:"is_ns" groups:"short,normal,long,trace"`
+	Name          string   `json:"name" groups:"short,normal,long,trace"`
+	Type          string   `json:"type" groups:"short,normal,long,trace"`
+	IPv4Addresses []string `json:"ipv4_addresses,omitempty" groups:"short,normal,long,trace"`
+	IPv6Addresses []string `json:"ipv6_addresses,omitempty" groups:"short,normal,long,trace"`
+	TTL           uint32   `json:"ttl" groups:"normal,long,trace"`
+}
+
+func (s *Lookup) BuildGraph(question Question, nameServer string) (interface{}, zdns.Trace, zdns.Status, error) {
+
+	// graph := map[string][]string{
+	// 	"esrg.stanford.edu":        []string{"dns-01.esrg.stanford.edu"},
+	// 	"dns-01.esrg.stanford.edu": {}, // SOA
+	// 	"stanford.edu":             []string{"avallone.stanford.edu", "ns6.dnsmadeeasy.com"},
+	// 	"avallone.stanford.edu":    {}, // SOA
+	// 	"ns6.dnsmadeeasy.com":      {}, // SOA
+	// 	"dnsmadeeasy.com":          []string{"ns6.dnsmadeeasy.com"},
+	// 	"edu":                      []string{"a.edu-servers.net"},
+	// 	"a.edu-servers.net":        {}, // SOA
+	// 	"edu-servers.net":          []string{"av1.nstld.com"},
+	// 	"av1.nstld.com":            {}, // SOA
+	// 	"nstld.com":                []string{"av1.nstld.com"},
+	// 	"com":                      []string{"b.gtld-servers.net"},
+	// 	"b.gtld-servers.net":       {}, // SOA
+	// 	"gtld-servers.net":         []string{"av1.nstld.com"},
+	// 	"net":                      []string{"b.gtld-servers.net"},
+	// 	".":                        []string{"e.root-servers.net"},
+	// 	"e.root-servers.net":       {}, // SOA
+	// 	"root-servers.net":         []string{"e.root-servers.net"},
+	// }
+	//parent := parseParent("s.d.e.s.edu")
+	//fmt.Println(parent)
+	//trimmed := removeTrailingDot(parent)
+	//fmt.Println(trimmed)
+	// fmt.Println("Original graph")
+	// for k, v := range graph {
+	// 	fmt.Println(k, " -> ", v)
+	// }
+	// fmt.Print("===========\n\n")
+	fmt.Println("QUESTION: ", question)
+	g := make(map[string][]GraphNode)
+	queue := make([]string, 0)
+	queue = append(queue, question.Name)
+	visited := make(map[string]bool)
+	currSize := 0
+	currName := ""
+	// var result Result
+	// var trace zdns.Trace
+	// var status zdns.Status
+	// var err error
+	for len(queue) > 0 {
+		currSize = len(queue)
+		for i := 0; i < currSize; i++ {
+			currName = queue[0]
+			queue = queue[1:] // remove currName from queue
+			if _, seen := visited[currName]; seen {
+				continue
+			}
+
+			// make query to get all nameservers of currName
+			if currName == "." { // TODO how to query for root's nameservers?
+				continue
+			}
+			rawRes, _, _, err := s.DoMiekgLookup(Question{Name: currName, Type: s.DNSType, Class: s.DNSClass}, nameServer)
+			result, isResult := rawRes.(Result)
+			if !isResult || err != nil {
+				fmt.Println("Error, result is not of type Result!")
+				panic(err)
+			}
+
+			// var retv NSResult
+
+			// parse all nameservers and their IPs
+			ipv4s := make(map[string][]string)
+			ipv6s := make(map[string][]string)
+			for _, ans := range result.Additional {
+				a, ok := ans.(Answer)
+				if !ok {
+					continue
+				}
+				recName := strings.TrimSuffix(a.Name, ".")
+				if VerifyAddress(a.Type, a.Answer) {
+					if a.Type == "A" {
+						ipv4s[recName] = append(ipv4s[recName], a.Answer)
+					} else if a.Type == "AAAA" {
+						ipv6s[recName] = append(ipv6s[recName], a.Answer)
+					}
+				}
+			}
+			for _, ans := range result.Answers {
+				a, ok := ans.(Answer)
+				if !ok {
+					continue
+				}
+
+				if a.Type != "NS" {
+					continue
+				}
+
+				// var rec NSRecord
+				var rec GraphNode
+
+				rec.Type = a.Type
+				rec.Name = strings.TrimSuffix(a.Answer, ".")
+				rec.TTL = a.Ttl
+				rec.IsNS = true
+
+				if ips, ok := ipv4s[rec.Name]; ok {
+					rec.IPv4Addresses = ips
+				}
+				if ips, ok := ipv6s[rec.Name]; ok {
+					rec.IPv6Addresses = ips
+				}
+				g[currName] = append(g[currName], rec) // add neighbor to graph
+				queue = append(queue, rec.Name)        // add neighbor to queue
+				// retv.Servers = append(retv.Servers, rec)
+			}
+
+			// loop over nameservers (neighbors)
+			// for _, n := range retv.Servers {
+			// g[currName] = append(g[currName], n.Name) // add neighbor to graph
+			// queue = append(queue, n.Name)             // add neighbor to queue
+			// }
+
+			if currName != "." {
+				parent := parseParent(currName)
+				var parRec GraphNode
+				parRec.Name = parent
+				parRec.IsNS = false
+				g[currName] = append(g[currName], parRec) // add parent to graph
+				queue = append(queue, parent)             // add parent to queue
+			}
+			visited[currName] = true
+		}
+	}
+	fmt.Println("Assembled graph")
+	keys := make([]string, 0, len(g))
+	for k := range g {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Println(k, " -> ", g[k])
+	}
+
+	return s.DoMiekgLookup(question, nameServer)
 }
